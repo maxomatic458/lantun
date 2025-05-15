@@ -1,0 +1,11 @@
+[package]
+name = "lantun-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hex = "0.4.3"
+lantun-core = { path = "../lantun-core" }
+tokio = { version = "1.45.0", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"

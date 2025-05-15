@@ -1574,11 +1574,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lantun-cli"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "lantun-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lantun-core"
 version = "0.1.0"
 dependencies = [
  "bincode",
  "iroh",
+ "rand 0.8.5",
+ "socket2",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3303,6 +3320,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

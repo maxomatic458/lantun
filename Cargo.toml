@@ -1,2 +1,3 @@
 [workspace]
-members = ["lantun-core"]
+members = [ "lantun-cli","lantun-core"]
+resolver = "1"
