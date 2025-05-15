@@ -94,4 +94,6 @@ pub trait TunnelCommon {
     /// Get the amount of active connections.
     #[allow(async_fn_in_trait)]
     async fn num_active_connections(&self) -> usize;
+    /// Get the tunnel address.
+    fn addr(&self) -> SocketAddr;
 }

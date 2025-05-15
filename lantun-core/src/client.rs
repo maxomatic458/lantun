@@ -68,6 +68,16 @@ impl ClientState {
         }
     }
 
+    /// Get the tunnels.
+    pub fn tunnels(&self) -> &HashMap<(SocketAddr, TunnelProtocol), ClientTunnel> {
+        &self.tunnels
+    }
+
+    /// Get the tunnels mutable.
+    pub fn tunnels_mut(&mut self) -> &mut HashMap<(SocketAddr, TunnelProtocol), ClientTunnel> {
+        &mut self.tunnels
+    }
+
     /// Create a new tunnel.
     pub async fn create_tunnel(
         &mut self,
@@ -372,5 +382,9 @@ impl TunnelCommon for ClientTunnel {
         } else {
             0
         }
+    }
+
+    fn addr(&self) -> SocketAddr {
+        self.tunnel_addr
     }
 }

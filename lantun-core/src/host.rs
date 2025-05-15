@@ -71,6 +71,16 @@ impl HostState {
         }
     }
 
+    /// Get the tunnels.
+    pub fn tunnels(&self) -> &HashMap<[u8; 32], HostTunnel> {
+        &self.tunnels
+    }
+
+    /// Get the tunnels mutable.
+    pub fn tunnels_mut(&mut self) -> &mut HashMap<[u8; 32], HostTunnel> {
+        &mut self.tunnels
+    }
+
     /// Create a new tunnel.
     pub async fn create_tunnel(
         &mut self,
@@ -419,5 +429,9 @@ impl TunnelCommon for HostTunnel {
         } else {
             0
         }
+    }
+
+    fn addr(&self) -> SocketAddr {
+        self.host_addr
     }
 }
