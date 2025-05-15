@@ -42,6 +42,11 @@ Now start the lantun program on both sides and keep it running to tunnel the con
 $ lantun
 ```
 
+The client can now join the host's server by connecting to `127.0.0.1:25565`.
+
+> [!NOTE]
+> If configured properly other devices on the client network can also join the host's server by connecting to the local IP address of the client (which is running lantun).
+
 see `lantun --help` for more options.
 
 ### Details
