@@ -7,7 +7,7 @@ description = "TODO"
 repository = "https://github.com/maxomatic458/lantun"
 readme = "../README.md"
 license = "MIT"
-keywords = ["quic", "port-forwarding", "tunneling", "peer-to-peer", "tui", "cli"]
+keywords = ["quic", "port-forwarding", "tunneling", "peer-to-peer", "cli"]
 
 [dependencies]
 tracing = { workspace = true }
@@ -19,7 +19,7 @@ color-eyre = "0.6.4"
 dirs = "6.0.0"
 futures = "0.3.31"
 hex = "0.4.3"
-lantun-core = { path = "../lantun-core" }
+lantun-core = "0.1.0"
 ratatui = "0.29.0"
 toml = "0.8.22"
 
