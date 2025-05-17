@@ -1768,7 +1768,7 @@ dependencies = [
  "dirs",
  "futures",
  "hex",
- "lantun-core",
+ "lantun-core 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "tokio",
  "toml",
@@ -1779,6 +1779,21 @@ dependencies = [
 [[package]]
 name = "lantun-core"
 version = "0.1.1"
+dependencies = [
+ "bincode",
+ "iroh",
+ "rand 0.8.5",
+ "serde",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lantun-core"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d25bd1937a74c0a498654764849b018e05f04ddfdbf73b507cb617c121d6a1d"
 dependencies = [
  "bincode",
  "iroh",
