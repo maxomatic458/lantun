@@ -1,6 +1,6 @@
 [package]
 name = "lantun-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Maxomatic458"]
 description = "TODO"
@@ -19,8 +19,8 @@ color-eyre = "0.6.4"
 dirs = "6.0.0"
 futures = "0.3.31"
 hex = "0.4.3"
-lantun-core = "0.1.0"
-ratatui = "0.29.0"
+# lantun-core = "0.1.1"
+lantun-core = { path = "../lantun-core" }
 toml = "0.8.22"
 
 [[bin]]

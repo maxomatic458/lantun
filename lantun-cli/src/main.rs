@@ -5,7 +5,6 @@ use lantun_core::{LANTUN_VERSION, TunnelProtocol, gen_secret};
 use std::{net::SocketAddr, path::PathBuf, pin::Pin};
 
 mod config;
-mod tui;
 
 fn default_config_file() -> PathBuf {
     dirs::config_dir()
@@ -93,9 +92,6 @@ async fn main() -> color_eyre::Result<()> {
 
     match args.action {
         None => {
-            // let tui = TuiApp::new(config.create_state().await?);
-            // tui::start_tui(tui)?;
-
             if config.host_tunnels.is_empty() && config.client_tunnels.is_empty() {
                 println!(
                     "No tunnels found. Use `lantun add-host` or `lantun add-client` to create a tunnel."

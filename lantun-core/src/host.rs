@@ -245,14 +245,22 @@ impl HostTunnel {
                     peer_public_key
                 );
 
-                HostTunnel::handle_connection(
+                match HostTunnel::handle_connection(
                     conn,
                     local_addr,
                     protocol,
                     connections.clone(),
                     stop_rx.clone(),
                 )
-                .await?;
+                .await
+                {
+                    Ok(_) => {
+                        tracing::debug!("Host tunnel \"{}\" connection closed", tunnel_name);
+                    }
+                    Err(e) => {
+                        tracing::error!("Host tunnel \"{}\" connection error: {}", tunnel_name, e);
+                    }
+                }
             }
         });
 
