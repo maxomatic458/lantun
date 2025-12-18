@@ -21,6 +21,7 @@ pub fn host_tcp_forwarder<RS, WS, RC, WC>(
     mut from2: RC,
     mut to2: WS,
     config: ForwarderConfig,
+    mut on_connection_closed: impl FnMut() + Send + 'static,
 ) -> tokio::task::JoinHandle<()>
 where
     RS: AsyncReadExt + Unpin + Send + 'static,
@@ -85,5 +86,7 @@ where
                 }
             }
         }
+
+        on_connection_closed();
     })
 }

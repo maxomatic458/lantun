@@ -7,7 +7,7 @@ use iroh::{Endpoint, PublicKey, SecretKey, endpoint::Connection};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 use thiserror::Error;
 use tokio::{net::TcpSocket, sync::RwLock};
@@ -45,7 +45,10 @@ struct ClientConnection {
     connection: Connection,
     /// The virtual address assigned to this client.
     virtual_addr: SocketAddr,
-    forwarder: tokio::task::JoinHandle<()>,
+    /// The handle to the stream acceptor task that handles multiple bi-directional streams
+    stream_acceptor: tokio::task::JoinHandle<()>,
+    /// If the connection is still open
+    is_open: Arc<AtomicBool>,
 }
 
 impl ClientConnection {
@@ -54,42 +57,90 @@ impl ClientConnection {
         local: SocketAddr,
         proto: Protocol,
     ) -> Result<Self, HostError> {
-        let client_addr = if local.is_ipv4() {
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-        } else {
-            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0))
-        };
-
+        let is_open = Arc::new(AtomicBool::new(true));
+        let is_open_c = is_open.clone();
         match proto {
             Protocol::Tcp => {
-                let socket = if local.is_ipv4() {
-                    TcpSocket::new_v4().unwrap()
-                } else {
-                    TcpSocket::new_v6().unwrap()
+                // Spawn a task that accepts multiple bi-directional streams
+                // Each stream represents a separate TCP connection
+                let stream_acceptor = {
+                    let connection = connection.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            // Accept incoming bi-directional stream from client
+                            let Ok((channel_write, mut channel_read)) =
+                                connection.accept_bi().await
+                            else {
+                                tracing::debug!("Connection closed or failed to accept bi stream");
+                                break;
+                            };
+
+                            tracing::debug!("Accepted bi-directional stream for TCP connection");
+
+                            // For each stream, establish a new TCP connection to the local service
+                            let local = local;
+                            let is_open_c = is_open.clone();
+                            tokio::spawn(async move {
+                                // Consume opening byte from client
+                                if let Err(e) = channel_read.read_exact(&mut [0u8]).await {
+                                    tracing::error!("Failed to read opening byte: {}", e);
+                                    return;
+                                }
+
+                                let client_addr = if local.is_ipv4() {
+                                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                                } else {
+                                    SocketAddr::V6(SocketAddrV6::new(
+                                        Ipv6Addr::UNSPECIFIED,
+                                        0,
+                                        0,
+                                        0,
+                                    ))
+                                };
+
+                                let socket = if local.is_ipv4() {
+                                    TcpSocket::new_v4().unwrap()
+                                } else {
+                                    TcpSocket::new_v6().unwrap()
+                                };
+
+                                socket.bind(client_addr).unwrap();
+                                tracing::debug!("Connecting to local service at {}", local);
+
+                                let Ok(stream) = socket.connect(local).await else {
+                                    tracing::error!(
+                                        "Failed to connect to local service at {}",
+                                        local
+                                    );
+                                    return;
+                                };
+
+                                let (stream_read, stream_write) = stream.into_split();
+
+                                // Start forwarding data between the stream and the channel
+                                let _forwarder = host_tcp_forwarder(
+                                    channel_read,
+                                    stream_write,
+                                    stream_read,
+                                    channel_write,
+                                    Default::default(),
+                                    move || {
+                                        is_open_c.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    },
+                                );
+
+                                // Wait for forwarder to complete
+                                _forwarder.await.ok();
+                            });
+                        }
+                    })
                 };
-
-                socket.bind(client_addr).unwrap();
-                println!("connecting to local addr {}", local);
-                let stream = socket.connect(local).await.unwrap();
-                let (stream_read, stream_write) = stream.into_split();
-                println!("opening bi stream");
-                let (mut channel_write, channel_read) = connection.open_bi().await?;
-
-                // send opening byte
-                channel_write.write_all(&[0u8]).await?;
-
-                let forwarder = host_tcp_forwarder(
-                    channel_read,
-                    stream_write,
-                    stream_read,
-                    channel_write,
-                    Default::default(),
-                );
 
                 Ok(Self {
                     connection,
                     virtual_addr: local,
-                    forwarder,
+                    stream_acceptor,
+                    is_open: is_open_c,
                 })
             }
             Protocol::Udp => {
@@ -246,7 +297,7 @@ impl HostTunnel<Running> {
         let active_connections = active_props.active_connections.read().await;
         for (_addr, conn) in active_connections.iter() {
             conn.connection.close(0u32.into(), b"");
-            conn.forwarder.abort();
+            conn.stream_acceptor.abort();
         }
 
         active_props.conn_acceptor.abort();
@@ -262,7 +313,18 @@ impl HostTunnel<Running> {
         }
     }
 
+    async fn clean_closed_connections(&self) {
+        let active_props = self.state.0.write().await;
+        let mut active_connections = active_props.active_connections.write().await;
+
+        active_connections.retain(|_addr, conn| {
+            conn.is_open.load(std::sync::atomic::Ordering::SeqCst)
+        });
+    }
+
     pub async fn num_connections(&self) -> usize {
+        self.clean_closed_connections().await;
+
         self.state
             .0
             .read()

@@ -4,9 +4,16 @@ use crate::{
     forwarder::host_tcp_forwarder,
 };
 use iroh::{Endpoint, PublicKey, endpoint::Connection};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicBool},
+};
 use thiserror::Error;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::RwLock,
+};
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -20,6 +27,8 @@ pub enum ClientError {
     ConnectionError(#[from] iroh::endpoint::ConnectionError),
     #[error("Read exact error: {0}")]
     ReadExactError(#[from] iroh::endpoint::ReadExactError),
+    #[error("Write error: {0}")]
+    WriteError(#[from] iroh::endpoint::WriteError),
 }
 
 /// Marker type for a stopped client tunnel
@@ -45,61 +54,50 @@ struct LocalConnection {
     local_addr: SocketAddr,
     /// The handle to the forwarder task
     forwarder: tokio::task::JoinHandle<()>,
+    /// If the connection is still open
+    is_open: Arc<AtomicBool>,
 }
 
 impl LocalConnection {
-    /// Will block until an connection attempt is made to the local addr of the tunnel
+    /// Creates a new local connection from an accepted TCP stream
     pub async fn new(
         connection: &Connection,
+        stream: TcpStream,
         local_addr: SocketAddr,
-        proto: Protocol,
     ) -> Result<Self, ClientError> {
-        match proto {
-            Protocol::Tcp => {
-                let listener = TcpListener::bind(local_addr).await?;
-                tracing::debug!(
-                    "Local TCP listener for client tunnel bound at {}",
-                    local_addr
-                );
+        tracing::info!(
+            "Accepted local TCP connection for client tunnel at {}",
+            local_addr
+        );
 
-                loop {
-                    let Ok((stream, local_addr)) = listener.accept().await else {
-                        continue;
-                    };
+        let (stream_read, stream_write) = stream.into_split();
+        tracing::debug!("Opening bi-directional stream to host");
 
-                    tracing::info!(
-                        "Accepted local TCP connection for client tunnel at {}",
-                        local_addr
-                    );
+        // Client opens a bi-directional stream to the host
+        let (mut channel_write, channel_read) = connection.open_bi().await?;
 
-                    let (stream_read, stream_write) = stream.into_split();
-                    println!("accepting bi stream");
-                    let Ok((channel_write, mut channel_read)) = connection.accept_bi().await else {
-                        tracing::error!("Failed to accept bi-directional stream on connection");
-                        continue;
-                    };
+        // Send opening byte to host
+        channel_write.write_all(&[0u8]).await?;
 
-                    // Consume opening byte
-                    channel_read.read_exact(&mut [0u8]).await?;
+        let is_open = Arc::new(AtomicBool::new(true));
+        let is_open_c = is_open.clone();
 
-                    let forwarder = host_tcp_forwarder(
-                        stream_read,
-                        channel_write,
-                        channel_read,
-                        stream_write,
-                        Default::default(),
-                    );
+        let forwarder = host_tcp_forwarder(
+            stream_read,
+            channel_write,
+            channel_read,
+            stream_write,
+            Default::default(),
+            move || {
+                is_open_c.store(false, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
 
-                    return Ok(LocalConnection {
-                        local_addr,
-                        forwarder,
-                    });
-                }
-            }
-            Protocol::Udp => {
-                todo!();
-            }
-        }
+        Ok(LocalConnection {
+            local_addr,
+            forwarder,
+            is_open,
+        })
     }
 }
 
@@ -194,14 +192,37 @@ impl ClientTunnel<Stopped> {
             let addr = self.addr;
 
             tokio::spawn(async move {
-                loop {
-                    let Ok(local_conn) = LocalConnection::new(&conn, addr, proto).await else {
-                        continue;
-                    };
+                // For TCP, create a single listener that accepts multiple connections
+                match proto {
+                    Protocol::Tcp => {
+                        let Ok(listener) = TcpListener::bind(addr).await else {
+                            tracing::error!(
+                                "Failed to bind TCP listener for client tunnel at {}",
+                                addr
+                            );
+                            return;
+                        };
 
-                    {
-                        let mut connections = local_connections.write().await;
-                        connections.insert(local_conn.local_addr, local_conn);
+                        loop {
+                            let Ok((stream, client_addr)) = listener.accept().await else {
+                                continue;
+                            };
+
+                            let Ok(local_conn) =
+                                LocalConnection::new(&conn, stream, client_addr).await
+                            else {
+                                tracing::error!("Failed to create local connection");
+                                continue;
+                            };
+
+                            {
+                                let mut connections = local_connections.write().await;
+                                connections.insert(local_conn.local_addr, local_conn);
+                            }
+                        }
+                    }
+                    Protocol::Udp => {
+                        todo!("UDP support not yet implemented");
                     }
                 }
             })
@@ -246,5 +267,29 @@ impl ClientTunnel<Running> {
             proto: self.proto,
             state: Stopped,
         }
+    }
+
+    async fn clean_closed_connections(&self) {
+        let active_props = self.state.0.write().await;
+        let mut local_connections = active_props.local_connections.write().await;
+
+        local_connections.retain(|_addr, conn| {
+            
+
+            conn.is_open.load(std::sync::atomic::Ordering::SeqCst)
+        });
+    }
+
+    pub async fn num_local_connections(&self) -> usize {
+        self.clean_closed_connections().await;
+
+        self.state
+            .0
+            .read()
+            .await
+            .local_connections
+            .read()
+            .await
+            .len()
     }
 }

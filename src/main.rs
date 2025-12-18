@@ -5,6 +5,9 @@ mod forwarder;
 mod host;
 mod state;
 
+#[cfg(test)]
+mod tests;
+
 use clap::Parser;
 use clap::Subcommand;
 use iroh::PublicKey;
@@ -71,7 +74,7 @@ pub struct State {
 }
 
 impl State {
-    pub async fn from_config(config: &LantunConfig) -> color_eyre::Result<Self> {
+    pub async fn run_from_config(config: &LantunConfig) -> color_eyre::Result<Self> {
         let mut active_host_tunnels = Vec::new();
         let mut inactive_host_tunnels = Vec::new();
         let mut active_client_tunnels = Vec::new();
@@ -124,7 +127,7 @@ async fn main() -> color_eyre::Result<()> {
         None => {
             tracing::info!("Running lantun with config: {:?}", args.config);
 
-            let state = State::from_config(&config).await?;
+            let state = State::run_from_config(&config).await?;
         }
         Some(action) => match action {
             Action::CreateHostTunnel {
