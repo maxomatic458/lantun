@@ -1,17 +1,14 @@
+use crate::common::{FilteredUdpReader, FilteredUdpWriter};
 use crate::{
-    common::{ALPN, Protocol},
+    common::{ALPN, Protocol, TcpStreamOrUdpSocket},
     config::ClientTunnelConfig,
-    forwarder::host_tcp_forwarder,
+    forwarder::forwarder,
 };
 use iroh::{Endpoint, PublicKey, endpoint::Connection};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, UdpSocket},
     sync::RwLock,
 };
 
@@ -41,9 +38,9 @@ pub struct ActiveProps {
     /// Maps local client addresses to their underlying connections.
     local_connections: Arc<RwLock<HashMap<SocketAddr, LocalConnection>>>,
     /// The endpoint of the connection.
-    endpoint: Endpoint,
+    _endpoint: Endpoint,
     /// The handle to the local connection acceptor task
-    /// (We want a seperate data channel for each local connection,
+    /// (We want a separate data channel for each local connection,
     /// so we can have multiple local connections coming through the same tunnel)
     conn_acceptor: tokio::task::JoinHandle<()>,
 }
@@ -54,23 +51,22 @@ struct LocalConnection {
     local_addr: SocketAddr,
     /// The handle to the forwarder task
     forwarder: tokio::task::JoinHandle<()>,
-    /// If the connection is still open
-    is_open: Arc<AtomicBool>,
 }
 
 impl LocalConnection {
     /// Creates a new local connection from an accepted TCP stream
-    pub async fn new(
+    async fn new(
         connection: &Connection,
-        stream: TcpStream,
+        stream: TcpStreamOrUdpSocket,
         local_addr: SocketAddr,
+        all_connections: Arc<RwLock<HashMap<SocketAddr, LocalConnection>>>,
     ) -> Result<Self, ClientError> {
         tracing::info!(
             "Accepted local TCP connection for client tunnel at {}",
             local_addr
         );
 
-        let (stream_read, stream_write) = stream.into_split();
+        // let (stream_read, stream_write) = stream.into_split();
         tracing::debug!("Opening bi-directional stream to host");
 
         // Client opens a bi-directional stream to the host
@@ -79,25 +75,72 @@ impl LocalConnection {
         // Send opening byte to host
         channel_write.write_all(&[0u8]).await?;
 
-        let is_open = Arc::new(AtomicBool::new(true));
-        let is_open_c = is_open.clone();
+        let conn_closer = move || {
+            let all_connections = all_connections.clone();
+            let local_addr = local_addr;
+            async move {
+                tracing::info!(
+                    "Local connection at {} closed, removing from active connections",
+                    local_addr
+                );
+                let mut connections = all_connections.write().await;
+                connections.remove(&local_addr);
+            }
+        };
 
-        let forwarder = host_tcp_forwarder(
-            stream_read,
-            channel_write,
-            channel_read,
-            stream_write,
-            Default::default(),
-            move || {
-                is_open_c.store(false, std::sync::atomic::Ordering::SeqCst);
-            },
-        );
+        match stream {
+            TcpStreamOrUdpSocket::Tcp(stream) => {
+                let (stream_read, stream_write) = stream.into_split();
 
-        Ok(LocalConnection {
-            local_addr,
-            forwarder,
-            is_open,
-        })
+                let forwarder = forwarder(
+                    stream_read,
+                    channel_write,
+                    channel_read,
+                    stream_write,
+                    Default::default(),
+                    conn_closer,
+                );
+
+                Ok(LocalConnection {
+                    local_addr,
+                    forwarder,
+                })
+            }
+            TcpStreamOrUdpSocket::Udp(socket) => {
+                println!(
+                    "Creating forwarder for UDP local connection at {}",
+                    local_addr
+                );
+                let stream_read = FilteredUdpReader {
+                    socket: socket.clone(),
+                    client_addr: local_addr,
+                };
+
+                let stream_write = FilteredUdpWriter {
+                    socket: socket.clone(),
+                    client_addr: local_addr,
+                };
+
+                let forwarder = forwarder(
+                    stream_read,
+                    channel_write,
+                    channel_read,
+                    stream_write,
+                    Default::default(),
+                    conn_closer,
+                );
+
+                Ok(LocalConnection {
+                    local_addr,
+                    forwarder,
+                })
+            }
+        }
+
+        // Ok(LocalConnection {
+        //     local_addr,
+        //     forwarder,
+        // })
     }
 }
 
@@ -208,8 +251,15 @@ impl ClientTunnel<Stopped> {
                                 continue;
                             };
 
-                            let Ok(local_conn) =
-                                LocalConnection::new(&conn, stream, client_addr).await
+                            let stream = TcpStreamOrUdpSocket::from_tcp(stream);
+
+                            let Ok(local_conn) = LocalConnection::new(
+                                &conn,
+                                stream,
+                                client_addr,
+                                local_connections.clone(),
+                            )
+                            .await
                             else {
                                 tracing::error!("Failed to create local connection");
                                 continue;
@@ -222,7 +272,57 @@ impl ClientTunnel<Stopped> {
                         }
                     }
                     Protocol::Udp => {
-                        todo!("UDP support not yet implemented");
+                        let Ok(socket) = UdpSocket::bind(addr).await else {
+                            tracing::error!(
+                                "Failed to bind UDP socket for client tunnel at {}",
+                                addr
+                            );
+                            return;
+                        };
+
+                        let socket = Arc::new(socket);
+
+                        loop {
+                            let Ok(local_client_addr) = socket.peek_sender().await else {
+                                continue;
+                            };
+
+                            // Check if we already have a local connection for this client
+                            {
+                                let connections = local_connections.read().await;
+                                if connections.contains_key(&local_client_addr) {
+                                    continue;
+                                }
+                            }
+
+                            let socket = TcpStreamOrUdpSocket::from_udp(socket.clone());
+                            println!(
+                                "Bound socket at {} for client at {}",
+                                addr, local_client_addr
+                            );
+
+                            println!(
+                                "Creating new local UDP connection for client at {}",
+                                local_client_addr
+                            );
+
+                            let Ok(local_conn) = LocalConnection::new(
+                                &conn,
+                                socket,
+                                local_client_addr,
+                                local_connections.clone(),
+                            )
+                            .await
+                            else {
+                                tracing::error!("Failed to create local UDP connection");
+                                continue;
+                            };
+
+                            {
+                                let mut connections = local_connections.write().await;
+                                connections.insert(local_conn.local_addr, local_conn);
+                            }
+                        }
                     }
                 }
             })
@@ -235,7 +335,7 @@ impl ClientTunnel<Stopped> {
             proto: self.proto,
             state: Running(Arc::new(RwLock::new(ActiveProps {
                 local_connections,
-                endpoint,
+                _endpoint: endpoint,
                 conn_acceptor,
             }))),
         })
@@ -269,20 +369,7 @@ impl ClientTunnel<Running> {
         }
     }
 
-    async fn clean_closed_connections(&self) {
-        let active_props = self.state.0.write().await;
-        let mut local_connections = active_props.local_connections.write().await;
-
-        local_connections.retain(|_addr, conn| {
-            
-
-            conn.is_open.load(std::sync::atomic::Ordering::SeqCst)
-        });
-    }
-
     pub async fn num_local_connections(&self) -> usize {
-        self.clean_closed_connections().await;
-
         self.state
             .0
             .read()

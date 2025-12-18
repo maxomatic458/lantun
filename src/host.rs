@@ -1,27 +1,30 @@
 use crate::{
-    common::{ALPN, Protocol},
+    common::{ALPN, Protocol, UdpReader, UdpWriter},
     config::HostTunnelConfig,
-    forwarder::host_tcp_forwarder,
+    forwarder::forwarder,
 };
 use iroh::{Endpoint, PublicKey, SecretKey, endpoint::Connection};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
 };
 use thiserror::Error;
-use tokio::{net::TcpSocket, sync::RwLock};
+use tokio::{
+    net::{TcpSocket, UdpSocket},
+    sync::RwLock,
+};
 
 #[derive(Error, Debug)]
 pub enum HostError {
     #[error("Failed to bind iroh endpoint: {0}")]
-    EndpointBindError(#[from] iroh::endpoint::BindError),
+    EndpointBind(#[from] iroh::endpoint::BindError),
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("Connection error: {0}")]
-    ConnectionError(#[from] iroh::endpoint::ConnectionError),
+    Connection(#[from] iroh::endpoint::ConnectionError),
     #[error("Write error: {0}")]
-    WriteError(#[from] iroh::endpoint::WriteError),
+    Write(#[from] iroh::endpoint::WriteError),
 }
 
 /// Marker type for a stopped tunnel
@@ -35,7 +38,7 @@ pub struct ActiveProps {
     /// Maps the local/virtual address of the client to the underlying connection.
     active_connections: Arc<RwLock<HashMap<SocketAddr, ClientConnection>>>,
     /// Endpoint created by this tunnel.
-    endpoint: Endpoint,
+    _endpoint: Endpoint,
     /// The handle to the connection acceptor task
     conn_acceptor: tokio::task::JoinHandle<()>,
 }
@@ -47,8 +50,6 @@ struct ClientConnection {
     virtual_addr: SocketAddr,
     /// The handle to the stream acceptor task that handles multiple bi-directional streams
     stream_acceptor: tokio::task::JoinHandle<()>,
-    /// If the connection is still open
-    is_open: Arc<AtomicBool>,
 }
 
 impl ClientConnection {
@@ -56,9 +57,8 @@ impl ClientConnection {
         connection: Connection,
         local: SocketAddr,
         proto: Protocol,
+        all_connections: Arc<RwLock<HashMap<SocketAddr, ClientConnection>>>,
     ) -> Result<Self, HostError> {
-        let is_open = Arc::new(AtomicBool::new(true));
-        let is_open_c = is_open.clone();
         match proto {
             Protocol::Tcp => {
                 // Spawn a task that accepts multiple bi-directional streams
@@ -77,9 +77,7 @@ impl ClientConnection {
 
                             tracing::debug!("Accepted bi-directional stream for TCP connection");
 
-                            // For each stream, establish a new TCP connection to the local service
-                            let local = local;
-                            let is_open_c = is_open.clone();
+                            let all_connections_clone = all_connections.clone();
                             tokio::spawn(async move {
                                 // Consume opening byte from client
                                 if let Err(e) = channel_read.read_exact(&mut [0u8]).await {
@@ -118,14 +116,23 @@ impl ClientConnection {
                                 let (stream_read, stream_write) = stream.into_split();
 
                                 // Start forwarding data between the stream and the channel
-                                let _forwarder = host_tcp_forwarder(
+                                let _forwarder = forwarder(
                                     channel_read,
                                     stream_write,
                                     stream_read,
                                     channel_write,
                                     Default::default(),
                                     move || {
-                                        is_open_c.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        let all_connections = all_connections_clone.clone();
+                                        let local_addr = local;
+                                        async move {
+                                            tracing::info!(
+                                                "Local connection at {} closed, removing from active connections",
+                                                local_addr
+                                            );
+                                            let mut connections = all_connections.write().await;
+                                            connections.remove(&local_addr);
+                                        }
                                     },
                                 );
 
@@ -140,11 +147,100 @@ impl ClientConnection {
                     connection,
                     virtual_addr: local,
                     stream_acceptor,
-                    is_open: is_open_c,
                 })
             }
             Protocol::Udp => {
-                todo!();
+                let stream_acceptor = {
+                    let connection = connection.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            let Ok((channel_write, mut channel_read)) =
+                                connection.accept_bi().await
+                            else {
+                                tracing::debug!("Connection closed or failed to accept bi stream");
+                                break;
+                            };
+
+                            tracing::debug!("Accepted bi-directional stream for UDP connection");
+
+                            let all_connections_clone = all_connections.clone();
+                            tokio::spawn(async move {
+                                // Consume opening byte from client
+                                if let Err(e) = channel_read.read_exact(&mut [0u8]).await {
+                                    tracing::error!("Failed to read opening byte: {}", e);
+                                    return;
+                                }
+
+                                let client_addr = if local.is_ipv4() {
+                                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                                } else {
+                                    SocketAddr::V6(SocketAddrV6::new(
+                                        Ipv6Addr::UNSPECIFIED,
+                                        0,
+                                        0,
+                                        0,
+                                    ))
+                                };
+
+                                let Ok(socket) = UdpSocket::bind(client_addr).await else {
+                                    tracing::error!(
+                                        "Failed to bind UDP socket for local service at {}",
+                                        local
+                                    );
+                                    return;
+                                };
+
+                                tracing::debug!("Connecting to local UDP service at {}", local);
+
+                                if let Err(e) = socket.connect(local).await {
+                                    tracing::error!(
+                                        "Failed to connect UDP socket to local service at {}: {}",
+                                        local,
+                                        e
+                                    );
+                                    return;
+                                }
+
+                                let sock_arc = Arc::new(socket);
+
+                                let stream_read = UdpReader {
+                                    socket: sock_arc.clone(),
+                                };
+
+                                let stream_write = UdpWriter {
+                                    socket: sock_arc.clone(),
+                                };
+
+                                let _forwarder = forwarder(
+                                    channel_read,
+                                    stream_write,
+                                    stream_read,
+                                    channel_write,
+                                    Default::default(),
+                                    move || {
+                                        let all_connections = all_connections_clone.clone();
+                                        let local_addr = local;
+                                        async move {
+                                            tracing::info!(
+                                                "Local UDP connection at {} closed, removing from active connections",
+                                                local_addr
+                                            );
+                                            let mut connections = all_connections.write().await;
+                                            connections.remove(&local_addr);
+                                        }
+                                    },
+                                );
+                                // Wait for forwarder to complete
+                                _forwarder.await.ok();
+                            });
+                        }
+                    })
+                };
+                Ok(Self {
+                    connection,
+                    virtual_addr: local,
+                    stream_acceptor,
+                })
             }
         }
     }
@@ -219,7 +315,7 @@ impl HostTunnel<Stopped> {
             .relay_mode(iroh::RelayMode::Default)
             .bind()
             .await
-            .map_err(HostError::EndpointBindError)?;
+            .map_err(HostError::EndpointBind)?;
 
         tracing::info!("Host tunnel \"{:?}\" started", self.name);
 
@@ -245,7 +341,14 @@ impl HostTunnel<Stopped> {
                             };
                             println!("Accepted new connection");
 
-                            let conn = match ClientConnection::new(connection, addr, proto).await {
+                            let conn = match ClientConnection::new(
+                                connection,
+                                addr,
+                                proto,
+                                active_connections.clone(),
+                            )
+                            .await
+                            {
                                 Ok(c) => c,
                                 Err(e) => {
                                     tracing::error!("Failed to create client connection: {}", e);
@@ -273,7 +376,7 @@ impl HostTunnel<Stopped> {
 
         let active_props = Arc::new(RwLock::new(ActiveProps {
             active_connections: active_connections.clone(),
-            endpoint,
+            _endpoint: endpoint,
             conn_acceptor,
         }));
 
@@ -313,18 +416,7 @@ impl HostTunnel<Running> {
         }
     }
 
-    async fn clean_closed_connections(&self) {
-        let active_props = self.state.0.write().await;
-        let mut active_connections = active_props.active_connections.write().await;
-
-        active_connections.retain(|_addr, conn| {
-            conn.is_open.load(std::sync::atomic::Ordering::SeqCst)
-        });
-    }
-
     pub async fn num_connections(&self) -> usize {
-        self.clean_closed_connections().await;
-
         self.state
             .0
             .read()

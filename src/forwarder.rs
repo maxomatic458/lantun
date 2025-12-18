@@ -8,26 +8,28 @@ pub struct ForwarderConfig {
 impl Default for ForwarderConfig {
     fn default() -> Self {
         Self {
-            buffer_size: 8 * 1024,
+            buffer_size: 65536,
             timeout: None,
         }
     }
 }
 
 /// Starts the forwarding between a local socket and a quic message stream
-pub fn host_tcp_forwarder<RS, WS, RC, WC>(
+pub fn forwarder<RS, WS, RC, WC, F, Fut>(
     mut from1: RS,
     mut to1: WC,
     mut from2: RC,
     mut to2: WS,
     config: ForwarderConfig,
-    mut on_connection_closed: impl FnMut() + Send + 'static,
+    mut on_connection_closed: F,
 ) -> tokio::task::JoinHandle<()>
 where
     RS: AsyncReadExt + Unpin + Send + 'static,
     WS: AsyncWriteExt + Unpin + Send + 'static,
     RC: AsyncReadExt + Unpin + Send + 'static,
     WC: AsyncWriteExt + Unpin + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+    F: FnMut() -> Fut + Send + 'static,
 {
     tokio::spawn(async move {
         let mut socket_buf = vec![0u8; config.buffer_size];
@@ -87,6 +89,6 @@ where
             }
         }
 
-        on_connection_closed();
+        on_connection_closed().await;
     })
 }

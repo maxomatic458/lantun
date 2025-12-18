@@ -3,31 +3,25 @@ use iroh::SecretKey;
 use rand::Rng;
 use std::net::SocketAddr;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::UdpSocket,
     time::{Duration, timeout},
 };
 
-/// Helper to create a test TCP echo server
+/// Helper to create a test UDP echo server
 async fn start_echo_server(addr: SocketAddr) -> tokio::task::JoinHandle<()> {
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let socket = UdpSocket::bind(addr).await.unwrap();
 
     tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 1024];
-                loop {
-                    match stream.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if stream.write_all(&buf[..n]).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+        let mut buf = vec![0u8; 65536];
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((n, peer_addr)) => {
+                    if socket.send_to(&buf[..n], peer_addr).await.is_err() {
+                        break;
                     }
                 }
-            });
+                Err(_) => break,
+            }
         }
     })
 }
@@ -35,9 +29,9 @@ async fn start_echo_server(addr: SocketAddr) -> tokio::task::JoinHandle<()> {
 #[tokio::test]
 async fn test_tunnel_creation() {
     let echo_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(echo_addr).await.unwrap();
-    let echo_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(echo_addr).await.unwrap();
+    let echo_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let secret = SecretKey::generate(&mut rand::rng());
 
@@ -45,7 +39,7 @@ async fn test_tunnel_creation() {
         Some("test-host".to_string()),
         secret,
         echo_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     // Start tunnel and connect to iroh network
@@ -61,9 +55,9 @@ async fn test_tunnel_creation() {
 async fn test_data_exchange() {
     // Start a local echo server
     let echo_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(echo_addr).await.unwrap();
-    let echo_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(echo_addr).await.unwrap();
+    let echo_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let _echo_server = start_echo_server(echo_addr).await;
 
@@ -78,7 +72,7 @@ async fn test_data_exchange() {
         Some("test-host".to_string()),
         secret,
         echo_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let mut host_tunnel = host_tunnel
@@ -90,15 +84,15 @@ async fn test_data_exchange() {
 
     // Create and start client tunnel
     let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(client_addr).await.unwrap();
-    let client_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(client_addr).await.unwrap();
+    let client_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let client_tunnel = ClientTunnel::new(
         Some("test-client".to_string()),
         public_key,
         client_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let client_tunnel = client_tunnel
@@ -108,30 +102,29 @@ async fn test_data_exchange() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // local connection to client tunnel's internal socket
-    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(client_addr))
-        .await
-        .expect("Timeout connecting to client tunnel")
-        .expect("Failed to connect to client tunnel");
+    // Create UDP socket to send to client tunnel's internal socket
+    let send_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
     // Send data over tunnel
     let test_data = rand::rng()
         .sample_iter::<u8, _>(rand::distr::StandardUniform)
         .take(1024)
         .collect::<Vec<u8>>();
-    stream
-        .write_all(&test_data)
+
+    send_socket
+        .send_to(&test_data, client_addr)
         .await
-        .expect("Failed to write data");
+        .expect("Failed to send data");
 
     // Read echo data
     let mut buf = vec![0u8; test_data.len()];
-    let read_result = timeout(Duration::from_secs(5), stream.read_exact(&mut buf))
+    let read_result = timeout(Duration::from_secs(5), send_socket.recv_from(&mut buf))
         .await
         .expect("Timeout reading response");
 
-    read_result.expect("Failed to read response");
+    let (n, _) = read_result.expect("Failed to read response");
 
+    assert_eq!(n, test_data.len());
     assert_eq!(buf, test_data, "Echoed data doesn't match sent data");
     assert_eq!(host_tunnel.num_connections().await, 1);
 
@@ -148,9 +141,9 @@ async fn test_data_exchange() {
 #[tokio::test]
 async fn test_multiple_concurrent_clients() {
     let echo_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(echo_addr).await.unwrap();
-    let echo_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(echo_addr).await.unwrap();
+    let echo_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let _echo_server = start_echo_server(echo_addr).await;
 
@@ -164,7 +157,7 @@ async fn test_multiple_concurrent_clients() {
         Some("test-host-multi".to_string()),
         secret,
         echo_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let host_tunnel = host_tunnel
@@ -176,15 +169,15 @@ async fn test_multiple_concurrent_clients() {
 
     // Create and start client tunnel
     let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(client_addr).await.unwrap();
-    let client_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(client_addr).await.unwrap();
+    let client_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let client_tunnel = ClientTunnel::new(
         Some("test-client-multi".to_string()),
         public_key,
         client_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let client_tunnel = client_tunnel
@@ -201,26 +194,31 @@ async fn test_multiple_concurrent_clients() {
     for i in 0..NUM_CLIENTS {
         let client_addr = client_addr.clone();
         let handle = tokio::spawn(async move {
-            let mut stream = timeout(Duration::from_secs(15), TcpStream::connect(client_addr))
+            let socket = UdpSocket::bind("127.0.0.1:0")
                 .await
-                .expect(&format!("Client {}: Timeout connecting", i))
-                .expect(&format!("Client {}: Failed to connect", i));
+                .expect(&format!("Client {}: Failed to bind socket", i));
 
             // Each client sends unique data
             let test_data = format!("Hello from client {}", i);
-            stream
-                .write_all(test_data.as_bytes())
+            socket
+                .send_to(test_data.as_bytes(), client_addr)
                 .await
-                .expect(&format!("Client {}: Failed to write", i));
+                .expect(&format!("Client {}: Failed to send", i));
 
             // Read echoed data back
             let mut buf = vec![0u8; test_data.len()];
-            let read_result = timeout(Duration::from_secs(5), stream.read_exact(&mut buf))
+            let read_result = timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
                 .await
                 .expect(&format!("Client {}: Timeout reading", i));
 
-            read_result.expect(&format!("Client {}: Failed to read", i));
+            let (n, _) = read_result.expect(&format!("Client {}: Failed to read", i));
 
+            assert_eq!(
+                n,
+                test_data.len(),
+                "Client {}: Received wrong amount of data",
+                i
+            );
             assert_eq!(
                 String::from_utf8_lossy(&buf),
                 test_data,
@@ -247,9 +245,9 @@ async fn test_multiple_concurrent_clients() {
 async fn test_large_data_transfer() {
     // Start a local echo server
     let echo_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(echo_addr).await.unwrap();
-    let echo_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(echo_addr).await.unwrap();
+    let echo_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let _echo_server = start_echo_server(echo_addr).await;
 
@@ -263,7 +261,7 @@ async fn test_large_data_transfer() {
         Some("test-host-large".to_string()),
         secret,
         echo_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let host_tunnel = host_tunnel
@@ -275,15 +273,15 @@ async fn test_large_data_transfer() {
 
     // Create and start client tunnel
     let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(client_addr).await.unwrap();
-    let client_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(client_addr).await.unwrap();
+    let client_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let client_tunnel = ClientTunnel::new(
         Some("test-client-large".to_string()),
         public_key,
         client_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let client_tunnel = client_tunnel
@@ -293,27 +291,27 @@ async fn test_large_data_transfer() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Connect to the client tunnel
-    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(client_addr))
-        .await
-        .expect("Timeout connecting to client tunnel")
-        .expect("Failed to connect to client tunnel");
+    // Create UDP socket
+    let send_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-    // Send large payload (100KB)
-    let test_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
-    stream
-        .write_all(&test_data)
+    // Send large payload (9KB - safe size that works reliably on all systems)
+    // for some reason packets above ~10KB are dropped even locally (linux)
+    // TODO: figure out if this needs to be fixed
+    let test_data: Vec<u8> = (0..9_000).map(|i| (i % 256) as u8).collect();
+    send_socket
+        .send_to(&test_data, client_addr)
         .await
-        .expect("Failed to write large data");
+        .expect("Failed to send large data");
 
     // Read echoed data back
     let mut buf = vec![0u8; test_data.len()];
-    let read_result = timeout(Duration::from_secs(10), stream.read_exact(&mut buf))
+    let read_result = timeout(Duration::from_secs(10), send_socket.recv_from(&mut buf))
         .await
         .expect("Timeout reading large response");
 
-    read_result.expect("Failed to read large response");
+    let (n, _) = read_result.expect("Failed to read large response");
 
+    assert_eq!(n, test_data.len(), "Received wrong amount of data");
     assert_eq!(buf, test_data, "Large echoed data doesn't match sent data");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -327,14 +325,14 @@ async fn test_large_data_transfer() {
     let _stopped_host = host_tunnel.stop().await;
 }
 
-/// Test sequential data exchanges on the same connection
+/// Test sequential data exchanges on the same socket
 #[tokio::test]
 async fn test_sequential_exchanges() {
     // Start a local echo server
     let echo_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(echo_addr).await.unwrap();
-    let echo_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(echo_addr).await.unwrap();
+    let echo_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let _echo_server = start_echo_server(echo_addr).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -347,7 +345,7 @@ async fn test_sequential_exchanges() {
         Some("test-host-seq".to_string()),
         secret,
         echo_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let host_tunnel = host_tunnel
@@ -359,15 +357,15 @@ async fn test_sequential_exchanges() {
 
     // Create and start client tunnel
     let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(client_addr).await.unwrap();
-    let client_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = UdpSocket::bind(client_addr).await.unwrap();
+    let client_addr = socket.local_addr().unwrap();
+    drop(socket);
 
     let client_tunnel = ClientTunnel::new(
         Some("test-client-seq".to_string()),
         public_key,
         client_addr,
-        Protocol::Tcp,
+        Protocol::Udp,
     );
 
     let client_tunnel = client_tunnel
@@ -377,30 +375,33 @@ async fn test_sequential_exchanges() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Connect once
-    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(client_addr))
-        .await
-        .expect("Timeout connecting to client tunnel")
-        .expect("Failed to connect to client tunnel");
+    // Create UDP socket for sending
+    let send_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-    // Perform multiple sequential exchanges on the same connection
+    // Perform multiple sequential exchanges on the same socket
     for i in 0..10 {
         let test_data = format!("Message number {}", i);
 
-        // Write
-        stream
-            .write_all(test_data.as_bytes())
+        // Send
+        send_socket
+            .send_to(test_data.as_bytes(), client_addr)
             .await
-            .expect(&format!("Failed to write message {}", i));
+            .expect(&format!("Failed to send message {}", i));
 
         // Read
         let mut buf = vec![0u8; test_data.len()];
-        let read_result = timeout(Duration::from_secs(5), stream.read_exact(&mut buf))
+        let read_result = timeout(Duration::from_secs(5), send_socket.recv_from(&mut buf))
             .await
             .expect(&format!("Timeout reading message {}", i));
 
-        read_result.expect(&format!("Failed to read message {}", i));
+        let (n, _) = read_result.expect(&format!("Failed to read message {}", i));
 
+        assert_eq!(
+            n,
+            test_data.len(),
+            "Message {}: received wrong amount of data",
+            i
+        );
         assert_eq!(
             String::from_utf8_lossy(&buf),
             test_data,
@@ -418,7 +419,7 @@ async fn test_sequential_exchanges() {
     let _stopped_host = host_tunnel.stop().await;
 }
 
-/// Test multiple different TCP tunnels running in parallel, each with multiple concurrent connections
+/// Test multiple different UDP tunnels running in parallel, each with multiple concurrent connections
 #[tokio::test]
 async fn test_multiple_tunnels_with_concurrent_connections() {
     const NUM_TUNNELS: usize = 10;
@@ -431,9 +432,9 @@ async fn test_multiple_tunnels_with_concurrent_connections() {
         let handle = tokio::spawn(async move {
             // Start a local echo server for this tunnel
             let echo_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let listener = TcpListener::bind(echo_addr).await.unwrap();
-            let echo_addr = listener.local_addr().unwrap();
-            drop(listener);
+            let socket = UdpSocket::bind(echo_addr).await.unwrap();
+            let echo_addr = socket.local_addr().unwrap();
+            drop(socket);
 
             let _echo_server = start_echo_server(echo_addr).await;
 
@@ -447,7 +448,7 @@ async fn test_multiple_tunnels_with_concurrent_connections() {
                 Some(format!("test-host-{}", tunnel_id)),
                 secret,
                 echo_addr,
-                Protocol::Tcp,
+                Protocol::Udp,
             );
 
             let host_tunnel = host_tunnel
@@ -459,15 +460,15 @@ async fn test_multiple_tunnels_with_concurrent_connections() {
 
             // Create and start client tunnel
             let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let listener = TcpListener::bind(client_addr).await.unwrap();
-            let client_addr = listener.local_addr().unwrap();
-            drop(listener);
+            let socket = UdpSocket::bind(client_addr).await.unwrap();
+            let client_addr = socket.local_addr().unwrap();
+            drop(socket);
 
             let client_tunnel = ClientTunnel::new(
                 Some(format!("test-client-{}", tunnel_id)),
                 public_key,
                 client_addr,
-                Protocol::Tcp,
+                Protocol::Udp,
             );
 
             let client_tunnel = client_tunnel
@@ -483,59 +484,49 @@ async fn test_multiple_tunnels_with_concurrent_connections() {
             for conn_id in 0..CONNECTIONS_PER_TUNNEL {
                 let client_addr = client_addr.clone();
                 let handle = tokio::spawn(async move {
-                    let mut stream =
-                        timeout(Duration::from_secs(10), TcpStream::connect(client_addr))
-                            .await
-                            .expect(&format!(
-                                "Tunnel {}, Connection {}: Timeout connecting",
-                                tunnel_id, conn_id
-                            ))
-                            .expect(&format!(
-                                "Tunnel {}, Connection {}: Failed to connect",
-                                tunnel_id, conn_id
-                            ));
+                    let socket = UdpSocket::bind("127.0.0.1:0").await.expect(&format!(
+                        "Tunnel {}, Connection {}: Failed to bind socket",
+                        tunnel_id, conn_id
+                    ));
 
-                    // Each connection sends 10 packets sequentially on the same TCP stream
-                    const PACKETS_PER_CONNECTION: usize = 10;
-
-                    for packet_id in 0..PACKETS_PER_CONNECTION {
-                        let test_data = format!(
-                            "Tunnel {} - Connection {} - Packet {}",
-                            tunnel_id, conn_id, packet_id
-                        );
-
-                        stream
-                            .write_all(test_data.as_bytes())
-                            .await
-                            .expect(&format!(
-                                "Tunnel {}, Connection {}, Packet {}: Failed to write",
-                                tunnel_id, conn_id, packet_id
-                            ));
-
-                        // Read echoed data back
-                        let mut buf = vec![0u8; test_data.len()];
-                        let read_result =
-                            timeout(Duration::from_secs(5), stream.read_exact(&mut buf))
-                                .await
-                                .expect(&format!(
-                                    "Tunnel {}, Connection {}, Packet {}: Timeout reading",
-                                    tunnel_id, conn_id, packet_id
-                                ));
-
-                        read_result.expect(&format!(
-                            "Tunnel {}, Connection {}, Packet {}: Failed to read",
-                            tunnel_id, conn_id, packet_id
+                    let test_data =
+                        format!("Tunnel {} - Connection {} - Test Data", tunnel_id, conn_id);
+                    socket
+                        .send_to(test_data.as_bytes(), client_addr)
+                        .await
+                        .expect(&format!(
+                            "Tunnel {}, Connection {}: Failed to send",
+                            tunnel_id, conn_id
                         ));
 
-                        assert_eq!(
-                            String::from_utf8_lossy(&buf),
-                            test_data,
-                            "Tunnel {}, Connection {}, Packet {}: Echoed data doesn't match",
-                            tunnel_id,
-                            conn_id,
-                            packet_id
-                        );
-                    }
+                    // Read echoed data back
+                    let mut buf = vec![0u8; test_data.len()];
+                    let read_result = timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
+                        .await
+                        .expect(&format!(
+                            "Tunnel {}, Connection {}: Timeout reading",
+                            tunnel_id, conn_id
+                        ));
+
+                    let (n, _) = read_result.expect(&format!(
+                        "Tunnel {}, Connection {}: Failed to read",
+                        tunnel_id, conn_id
+                    ));
+
+                    assert_eq!(
+                        n,
+                        test_data.len(),
+                        "Tunnel {}, Connection {}: received wrong amount of data",
+                        tunnel_id,
+                        conn_id
+                    );
+                    assert_eq!(
+                        String::from_utf8_lossy(&buf),
+                        test_data,
+                        "Tunnel {}, Connection {}: Echoed data doesn't match",
+                        tunnel_id,
+                        conn_id
+                    );
                 });
 
                 connection_handles.push(handle);

@@ -3,7 +3,6 @@ mod common;
 mod config;
 mod forwarder;
 mod host;
-mod state;
 
 #[cfg(test)]
 mod tests;
@@ -127,7 +126,7 @@ async fn main() -> color_eyre::Result<()> {
         None => {
             tracing::info!("Running lantun with config: {:?}", args.config);
 
-            let state = State::run_from_config(&config).await?;
+            let _state = State::run_from_config(&config).await?;
         }
         Some(action) => match action {
             Action::CreateHostTunnel {
