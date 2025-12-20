@@ -83,7 +83,6 @@ impl State {
             let host_tunnel = HostTunnel::from_config(host_tunnel_config);
 
             if host_tunnel_config.enabled {
-                println!("Enabling host tunnel {:?}", host_tunnel.public_key());
                 active_host_tunnels.push(host_tunnel.start().await?);
             } else {
                 inactive_host_tunnels.push(host_tunnel);

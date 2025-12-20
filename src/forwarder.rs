@@ -44,7 +44,6 @@ where
             tokio::select! {
                 // Read from socket and write to stream
                 res = from1.read(&mut socket_buf) => {
-                    println!("read: {:?}", res);
                     match res {
                         Ok(0) => {
                             tracing::debug!("Socket closed");

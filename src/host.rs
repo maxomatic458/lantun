@@ -339,7 +339,6 @@ impl HostTunnel<Stopped> {
                                 tracing::error!("Failed to establish connection");
                                 continue;
                             };
-                            println!("Accepted new connection");
 
                             let conn = match ClientConnection::new(
                                 connection,

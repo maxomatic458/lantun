@@ -192,7 +192,7 @@ async fn test_multiple_concurrent_clients() {
         .await
         .expect("Failed to start client tunnel");
 
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     const NUM_CLIENTS: usize = 30;
     let mut handles = Vec::new();

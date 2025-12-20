@@ -107,10 +107,6 @@ impl LocalConnection {
                 })
             }
             TcpStreamOrUdpSocket::Udp(socket) => {
-                println!(
-                    "Creating forwarder for UDP local connection at {}",
-                    local_addr
-                );
                 let stream_read = FilteredUdpReader {
                     socket: socket.clone(),
                     client_addr: local_addr,
@@ -296,16 +292,7 @@ impl ClientTunnel<Stopped> {
                             }
 
                             let socket = TcpStreamOrUdpSocket::from_udp(socket.clone());
-                            println!(
-                                "Bound socket at {} for client at {}",
-                                addr, local_client_addr
-                            );
-
-                            println!(
-                                "Creating new local UDP connection for client at {}",
-                                local_client_addr
-                            );
-
+                            
                             let Ok(local_conn) = LocalConnection::new(
                                 &conn,
                                 socket,
