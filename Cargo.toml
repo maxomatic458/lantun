@@ -1,21 +1,54 @@
-[workspace]
-resolver = "1"
-members = [
-    "lantun-cli",
-    "lantun-core",
-]
+[package]
+name = "lantun"
+version = "0.2.0"
+edition = "2024"
+authors = ["Maxomatic458"]
+description = "Peer-to-peer port forwarding over QUIC (no router config needed)"
+repository = "https://github.com/maxomatic458/lantun"
+readme = "README.md"
+license = "MIT"
+keywords = ["quic", "port-forwarding", "tunneling", "peer-to-peer", "cli", "networking"]
+categories = ["network-programming", "command-line-utilities"]
 
-[workspace.dependencies]
-tokio = { version = "1.45.0", features = [
+[lib]
+name = "lantun"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lantun"
+path = "src/bin/lantun.rs"
+
+[dependencies]
+tokio = { version = "1.45", features = [
     "rt",
     "rt-multi-thread",
     "time",
     "macros",
     "net",
+    "signal",
+    "sync",
+    "io-util",
 ] }
-tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
-serde = { version = "1.0.219", features = ["derive"] }
+tokio-util = { version = "0.7", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+iroh = { version = "0.35", default-features = false }
+bincode = { version = "2.0", features = ["serde"] }
+thiserror = "2"
+rand = "0.8"
+
+clap = { version = "4.5", features = ["derive", "string"] }
+color-eyre = "0.6"
+dirs = "6"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+hex = "0.4"
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1.45", features = ["test-util"] }
+tempfile = "3"
 
 [profile.release]
 lto = true
