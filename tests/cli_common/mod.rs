@@ -124,49 +124,6 @@ pub async fn spawn_client(label: &str, entries: Vec<ClientSpec>) -> LantunProc {
     }
 }
 
-/// Spawn a lantun binary with inline `--host-tunnels` / `--client-tunnels` JSON args.
-/// Points `--config` at a non-existent path in a fresh tempdir; the CLI should NOT
-/// create it (the whole point of inline mode).
-pub async fn spawn_lantun_inline(
-    label: &str,
-    hosts_json: Option<String>,
-    clients_json: Option<String>,
-) -> (LantunProc, PathBuf) {
-    let dir = TempDir::new().unwrap();
-    let cfg_path = dir.path().join("should-not-exist.toml");
-
-    let mut cmd = Command::new(LANTUN_BIN);
-    // Point --config at a path in a scratch dir. If inline mode is doing its job, this
-    // file must remain nonexistent after startup.
-    cmd.arg("--config").arg(&cfg_path);
-    if let Some(json) = &hosts_json {
-        cmd.arg("--host-tunnels").arg(json);
-    }
-    if let Some(json) = &clients_json {
-        cmd.arg("--client-tunnels").arg(json);
-    }
-    cmd.env("LANTUN_RECONNECT_INITIAL_MS", "100");
-    cmd.env("LANTUN_RECONNECT_MAX_MS", "500");
-    cmd.env("RUST_LOG", "lantun=info");
-    cmd.env("LANTUN_LABEL", label);
-    cmd.kill_on_drop(true);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-    let child = cmd.spawn().expect("spawn lantun");
-
-    (
-        LantunProc {
-            pid: child.id().expect("pid"),
-            child,
-            config_dir: dir,
-            config_path: cfg_path.clone(),
-            label: format!("inline[{label}]"),
-        },
-        cfg_path,
-    )
-}
-
 /// Spawn a lantun binary. Inherits stdio so failures print into the test output.
 async fn spawn_lantun(config: &Path, label: &str) -> Child {
     let mut cmd = Command::new(LANTUN_BIN);

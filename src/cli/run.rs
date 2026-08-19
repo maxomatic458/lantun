@@ -1,11 +1,10 @@
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
 use color_eyre::eyre::{Context, bail};
 use iroh::{PublicKey, SecretKey};
-use serde::Deserialize;
 
 use crate::{
-    ClientTunnel, HostTunnel, ReconnectPolicy, TunnelProtocol, VERSION,
+    ClientTunnel, HostTunnel, ReconnectPolicy, VERSION,
     cli::{Action, Args, config},
     gen_secret,
 };
@@ -14,20 +13,6 @@ pub async fn run(args: Args) -> color_eyre::Result<()> {
     init_tracing(&args);
 
     tracing::debug!("lantun v{VERSION}");
-
-    // Inline mode: --host-tunnels / --client-tunnels bypass the config file entirely.
-    if args.host_tunnels.is_some() || args.client_tunnels.is_some() {
-        if args.action.is_some() {
-            bail!(
-                "--host-tunnels / --client-tunnels bypass the config file and can't be \
-                 combined with subcommands"
-            );
-        }
-        let cfg =
-            build_inline_config(args.host_tunnels.as_deref(), args.client_tunnels.as_deref())?;
-        return run_all(cfg).await;
-    }
-
     tracing::debug!("config: {}", args.config.display());
     let mut cfg = config::load(&args.config)?;
 
@@ -61,6 +46,7 @@ pub async fn run(args: Args) -> color_eyre::Result<()> {
             config::save(&args.config, &cfg)?;
             println!("Created host tunnel \"{name}\" on {local}/{protocol}");
             println!("Public key: {public_key}");
+            println!();
             println!("Peers can connect with:");
             println!("  lantun add-client {public_key} <local> {protocol} <name>");
             Ok(())
@@ -272,65 +258,6 @@ async fn run_all(cfg: config::Config) -> color_eyre::Result<()> {
         bail!("host tunnel \"{name}\" died unexpectedly — exiting...");
     }
     Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct InlineHost {
-    name: String,
-    local: SocketAddr,
-    protocol: TunnelProtocol,
-    secret_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct InlineClient {
-    name: String,
-    local: SocketAddr,
-    protocol: TunnelProtocol,
-    /// Public key of the host tunnel on the other side.
-    host_key: String,
-}
-
-fn build_inline_config(
-    hosts_json: Option<&str>,
-    clients_json: Option<&str>,
-) -> color_eyre::Result<config::Config> {
-    let mut cfg = config::Config::default();
-
-    if let Some(json) = hosts_json {
-        let hosts: Vec<InlineHost> =
-            serde_json::from_str(json).context("--host-tunnels: invalid JSON")?;
-        for h in hosts {
-            // Validate the secret up front
-            decode_secret_key(&h.secret_key)
-                .with_context(|| format!("--host-tunnels[{}].secret_key", h.name))?;
-            cfg.host_tunnels.push(config::HostEntry {
-                name: h.name,
-                local: h.local,
-                protocol: h.protocol,
-                secret_key: h.secret_key,
-                enabled: true,
-            });
-        }
-    }
-
-    if let Some(json) = clients_json {
-        let clients: Vec<InlineClient> =
-            serde_json::from_str(json).context("--client-tunnels: invalid JSON")?;
-        for c in clients {
-            let _ = decode_public_key(&c.host_key)
-                .with_context(|| format!("--client-tunnels[{}].host_key", c.name))?;
-            cfg.client_tunnels.push(config::ClientEntry {
-                name: c.name,
-                local: c.local,
-                protocol: c.protocol,
-                host_key: c.host_key,
-                enabled: true,
-            });
-        }
-    }
-
-    Ok(cfg)
 }
 
 fn decode_secret_key(hex_str: &str) -> color_eyre::Result<SecretKey> {

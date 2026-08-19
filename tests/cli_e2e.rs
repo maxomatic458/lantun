@@ -13,8 +13,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use cli_common::{
     ClientSpec, HostSpec, LANTUN_BIN, OP_TIMEOUT, pick_free_port_tcp, pick_free_port_udp,
-    spawn_client, spawn_host, spawn_lantun_inline, spawn_tcp_echo, spawn_udp_echo, wait_tcp_ready,
-    wait_udp_ready,
+    spawn_client, spawn_host, spawn_tcp_echo, spawn_udp_echo, wait_tcp_ready, wait_udp_ready,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -500,109 +499,6 @@ async fn disabled_tunnel_is_not_started() {
 
     client.kill_and_wait().await;
     host.kill_and_wait().await;
-}
-
-// ---------------------------- Inline (--host-tunnels / --client-tunnels) --------
-
-/// End-to-end TCP round-trip driven entirely by `--host-tunnels` and `--client-tunnels`
-/// JSON flags — no config file involved. Also asserts the config file at the passed
-/// `--config` path is NOT created (the whole point of inline mode).
-#[tokio::test]
-async fn inline_flags_bypass_config_file() {
-    use lantun::gen_secret;
-
-    let (backend, _echo) = spawn_tcp_echo().await;
-
-    let host_secret = gen_secret();
-    let host_secret_hex = hex::encode(host_secret.to_bytes());
-    let host_public_hex = hex::encode(host_secret.public());
-
-    let host_json = serde_json::to_string(&serde_json::json!([{
-        "name": "inline-h",
-        "local": backend.to_string(),
-        "protocol": "tcp",
-        "secret_key": host_secret_hex,
-    }]))
-    .unwrap();
-
-    let bind_port = pick_free_port_tcp().await;
-    let bind_str = format!("127.0.0.1:{bind_port}");
-    let client_json = serde_json::to_string(&serde_json::json!([{
-        "name": "inline-c",
-        "local": bind_str,
-        "protocol": "tcp",
-        "host_key": host_public_hex,
-    }]))
-    .unwrap();
-
-    let (host, host_cfg_path) = spawn_lantun_inline("inline-host", Some(host_json), None).await;
-    let (client, client_cfg_path) =
-        spawn_lantun_inline("inline-client", None, Some(client_json)).await;
-
-    let bind: SocketAddr = bind_str.parse().unwrap();
-    wait_tcp_ready(bind).await;
-
-    // Actually round-trip through the tunnel.
-    let mut s = TcpStream::connect(bind).await.unwrap();
-    s.write_all(b"inline!").await.unwrap();
-    let mut buf = [0u8; 7];
-    s.read_exact(&mut buf).await.unwrap();
-    assert_eq!(&buf, b"inline!");
-    drop(s);
-
-    // Critical: the config file we pointed --config at must NOT have been created,
-    // since inline mode is supposed to bypass config entirely.
-    assert!(
-        !host_cfg_path.exists(),
-        "host in inline mode created config file at {host_cfg_path:?}"
-    );
-    assert!(
-        !client_cfg_path.exists(),
-        "client in inline mode created config file at {client_cfg_path:?}"
-    );
-
-    client.kill_and_wait().await;
-    host.kill_and_wait().await;
-}
-
-/// Inline flags combined with a subcommand should error out — they're incompatible.
-#[tokio::test]
-async fn inline_flags_reject_subcommands() {
-    let output = tokio::process::Command::new(LANTUN_BIN)
-        .args(["--host-tunnels", "[]", "list"])
-        .env("RUST_LOG", "warn")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    let output = timeout(Duration::from_secs(5), output)
-        .await
-        .expect("should exit quickly")
-        .expect("spawn");
-    assert!(
-        !output.status.success(),
-        "expected nonzero exit, got {:?}",
-        output.status
-    );
-}
-
-/// Malformed inline JSON should error out with a nonzero exit — no panic, no silent success.
-#[tokio::test]
-async fn inline_malformed_json_errors() {
-    let output = tokio::process::Command::new(LANTUN_BIN)
-        .args(["--host-tunnels", "not valid json"])
-        .env("RUST_LOG", "warn")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    let output = timeout(Duration::from_secs(5), output)
-        .await
-        .expect("should exit quickly")
-        .expect("spawn");
-    assert!(
-        !output.status.success(),
-        "expected nonzero exit, got {:?}",
-        output.status
-    );
 }
 
 // ---------------------------- Shutdown / error cases ----------------------------

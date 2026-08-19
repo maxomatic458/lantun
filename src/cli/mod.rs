@@ -27,21 +27,6 @@ pub struct Args {
     #[arg(long, short, default_value = default_config_file().into_os_string())]
     pub config: PathBuf,
 
-    /// Inline host tunnels as a JSON array. When set, the config file is not read or
-    /// created. Each element: `{ "name": "...", "local": "127.0.0.1:PORT",
-    /// "protocol": "tcp"|"udp", "secret_key": "hex..." }`. Cannot be combined with
-    /// subcommands.
-    #[arg(long, value_name = "JSON")]
-    pub host_tunnels: Option<String>,
-
-    /// Inline client tunnels as a JSON array. When set, the config file is not read or
-    /// created. Each element: `{ "name": "...", "local": "127.0.0.1:PORT",
-    /// "protocol": "tcp"|"udp", "host_key": "hex..." }` where `host_key` is the public
-    /// key of the host tunnel this client connects to. Cannot be combined with
-    /// subcommands.
-    #[arg(long, value_name = "JSON")]
-    pub client_tunnels: Option<String>,
-
     #[command(subcommand)]
     pub action: Option<Action>,
 }

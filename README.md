@@ -46,16 +46,6 @@ Ctrl-C to stop.
 
 Other subcommands: `list`, `remove <name>`, `enable <name>`, `disable <name>`. Disabled tunnels are skipped when `lantun` is run without arguments. See `lantun --help` for the full listing.
 
-### Running without a config file (`--host-tunnels` / `--client-tunnels`)
-
-```
-lantun \
-  --host-tunnels '[{"name":"mc","local":"127.0.0.1:25565","protocol":"tcp","secret_key":"HEX..."}]' \
-  --client-tunnels '[{"name":"remote-mc","local":"127.0.0.1:25565","protocol":"tcp","host_key":"HEX..."}]'
-```
-
-(`host_key` on a client entry is the host's public key — the same hex string `lantun add-host` prints.)
-
 ## Config file location
 
 - Linux: `~/.config/lantun/lantun.toml`
